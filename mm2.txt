@@ -1,0 +1,1310 @@
+﻿-- =========================================================================
+-- УЛЬТРА-ХАБ ДЛЯ MM2: РАЗДЕЛЬНЫЙ ESP, ТРЕЙСЕРЫ, MAIN И СУПЕР-КНОПКИ С РЕЗАЙЗОМ
+-- =========================================================================
+
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- Очистка старой панели
+if CoreGui:FindFirstChild("CustomHubGui") then
+   CoreGui.CustomHubGui:Destroy()
+end
+
+-- =========================================================================
+-- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ СОСТОЯНИЯ И ЛОГИКИ
+-- =========================================================================
+local ESP_Enabled = false
+
+-- Раздельные переменные для Highlights
+local ESP_Highlight_Murderer = false
+local ESP_Highlight_Sheriff = false
+local ESP_Highlight_Innocent = false
+
+-- Раздельные переменные для Никнеймов
+local ESP_Name_Murderer = false
+local ESP_Name_Sheriff = false
+local ESP_Name_Innocent = false
+
+-- Радужные режимы
+local ESP_Rainbow_Names = false
+local ESP_Rainbow_Highlights = false
+
+-- Трейсеры
+local ESP_Tracers_Murderer = false
+local ESP_Tracers_Sheriff = false
+local ESP_Tracers_Innocent = false
+
+-- Вкладка Main
+local Main_WalkSpeed_Enabled = false
+local Main_WalkSpeed_Value = 16
+local Main_JumpPower_Enabled = false
+local Main_JumpPower_Value = 50
+
+-- BunnyHop
+local Main_BHop_Enabled = false
+local Main_BHop_Speed = 16
+
+-- Настройки тумана
+local Main_Fog_Enabled = false
+local Main_Fog_Radius = 500
+local Main_Fog_R = 255
+local Main_Fog_G = 255
+local Main_Fog_B = 255
+
+local OriginalFogStart = Lighting.FogStart
+local OriginalFogEnd = Lighting.FogEnd
+local OriginalFogColor = Lighting.FogColor
+
+-- Настройки Combat / World
+local AutoShoot_Enabled = false
+local WallCheck_Enabled = false
+local GunTP_Button_Enabled = false
+local Selected_Hitbox = "Head"
+local GunAura_Enabled = false
+local GunAura_Radius = 10 
+local ShootAI_Enabled = false
+local ShootAI_Delay = 1.0 
+
+-- Новая функция: Автоматический сбор пистолета (Auto Get Gun)
+local AutoGetGun_Enabled = false
+
+-- Соединения циклов
+local Connection_Fade = nil
+local Connection_RoundEnd = nil
+local Connection_CharacterTick = nil
+local ESP_Loop_Active = false
+local GunAura_Loop_Active = false
+local AutoGetGun_Loop_Active = false
+
+local CreatedHighlights = {}
+local CreatedNames = {}
+local CreatedTracers = {}
+local CurrentPlayersRoles = {} 
+local CurrentMurdererName = "" 
+
+local Colors = {
+   Murderer = Color3.fromRGB(255, 50, 50),
+   Sheriff = Color3.fromRGB(50, 50, 255),
+   Innocent = Color3.fromRGB(50, 255, 50),
+   Default = Color3.fromRGB(150, 150, 150)
+}
+
+local HitboxMapping = {
+   ["Head"] = {"Head"},
+   ["Torso / Body"] = {"HumanoidRootPart", "Torso", "UpperTorso", "LowerTorso"},
+   ["Left Leg"] = {"Left Leg", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot"},
+   ["Right Leg"] = {"Right Leg", "RightUpperLeg", "RightLowerLeg", "RightFoot"},
+   ["Left Arm"] = {"Left Arm", "LeftUpperArm", "LeftLowerArm", "LeftHand"},
+   ["Right Arm"] = {"Right Arm", "RightUpperArm", "RightLowerArm", "RightHand"}
+}
+
+-- Элементы интерактивных кнопок экрана
+local CombatScreenGui = nil
+local CombatClickButton = nil
+local WorldScreenGui = nil
+local WorldClickButton = nil
+
+-- Размеры по умолчанию для Shoot и GetGun (чтобы увеличивать при нажатии)
+local DefaultShootSize = UDim2.new(0, 160, 0, 45)
+local DefaultGetGunSize = UDim2.new(0, 160, 0, 160) -- Квадратная по умолчанию
+
+-- =========================================================================
+-- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ИГРОВОЙ ЛОГИКИ
+-- =========================================================================
+
+local function ClearAllESP()
+   for player, highlight in pairs(CreatedHighlights) do
+       if highlight and highlight.Parent then highlight:Destroy() end
+   end
+   table.clear(CreatedHighlights)
+   
+   for player, billGui in pairs(CreatedNames) do
+       if billGui and billGui.Parent then billGui:Destroy() end
+   end
+   table.clear(CreatedNames)
+
+   for player, tracerLine in pairs(CreatedTracers) do
+       if tracerLine then tracerLine:Remove() end
+   end
+   table.clear(CreatedTracers)
+end
+
+local function GetRoleColor(role, isName)
+   if isName and ESP_Rainbow_Names then return Color3.fromHSV(tick() % 5 / 5, 1, 1) end
+   if not isName and ESP_Rainbow_Highlights then return Color3.fromHSV(tick() % 5 / 5, 1, 1) end
+   if role == "Murderer" then return Colors.Murderer
+   elseif role == "Sheriff" then return Colors.Sheriff
+   elseif role == "Innocent" then return Colors.Innocent
+   end
+   return Colors.Default
+end
+
+local function UpdatePlayerESP(player, role)
+   if not player or player == LocalPlayer then return end
+   local character = player.Character
+   if not character then return end
+   local head = character:FindFirstChild("Head")
+   local hrp = character:FindFirstChild("HumanoidRootPart")
+   if not head or not hrp then return end
+
+   local shouldHighlight = false
+   if role == "Murderer" and ESP_Highlight_Murderer then shouldHighlight = true
+   elseif role == "Sheriff" and ESP_Highlight_Sheriff then shouldHighlight = true
+   elseif role == "Innocent" and ESP_Highlight_Innocent then shouldHighlight = true
+   end
+
+   local shouldName = false
+   if role == "Murderer" and ESP_Name_Murderer then shouldName = true
+   elseif role == "Sheriff" and ESP_Name_Sheriff then shouldName = true
+   elseif role == "Innocent" and ESP_Name_Innocent then shouldName = true
+   end
+
+   local shouldTracer = false
+   if role == "Murderer" and ESP_Tracers_Murderer then shouldTracer = true
+   elseif role == "Sheriff" and ESP_Tracers_Sheriff then shouldTracer = true
+   elseif role == "Innocent" and ESP_Tracers_Innocent then shouldTracer = true
+   end
+
+   local highlight = character:FindFirstChild("CustomESPHighlight")
+   if shouldHighlight then
+       if not highlight then
+           highlight = Instance.new("Highlight")
+           highlight.Name = "CustomESPHighlight"
+           highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+           highlight.FillTransparency = 0.4
+           highlight.OutlineTransparency = 0
+           highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+           highlight.Adornee = character
+           highlight.Parent = character
+           CreatedHighlights[player] = highlight
+       end
+       highlight.FillColor = GetRoleColor(role, false)
+   else
+       if highlight then highlight:Destroy() CreatedHighlights[player] = nil end
+   end
+
+   local billGui = head:FindFirstChild("CustomESPNameGui")
+   if shouldName then
+       if not billGui then
+           billGui = Instance.new("BillboardGui")
+           billGui.Name = "CustomESPNameGui"
+           billGui.Size = UDim2.new(0, 200, 0, 50)
+           billGui.StudsOffset = Vector3.new(0, 2.5, 0)
+           billGui.AlwaysOnTop = true
+           billGui.Adornee = head
+           billGui.Parent = head
+           
+           local textLabel = Instance.new("TextLabel")
+           textLabel.Name = "NameLabel"
+           textLabel.Size = UDim2.new(1, 0, 1, 0)
+           textLabel.BackgroundTransparency = 1
+           textLabel.Text = player.Name
+           textLabel.Font = Enum.Font.GothamBold
+           textLabel.TextSize = 13
+           textLabel.TextStrokeTransparency = 0
+           textLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+           textLabel.Parent = billGui
+           CreatedNames[player] = billGui
+       end
+       local label = billGui:FindFirstChild("NameLabel")
+       if label then label.TextColor3 = GetRoleColor(role, true) end
+   else
+       if billGui then billGui:Destroy() CreatedNames[player] = nil end
+   end
+
+   local tracerLine = CreatedTracers[player]
+   if shouldTracer then
+       local currentCamera = workspace.CurrentCamera
+       if currentCamera then
+           local screenPos, onScreen = currentCamera:WorldToViewportPoint(hrp.Position)
+           if onScreen then
+               if not tracerLine then
+                   tracerLine = Drawing.new("Line")
+                   tracerLine.Thickness = 1.5
+                   tracerLine.Transparency = 1
+                   CreatedTracers[player] = tracerLine
+               end
+               tracerLine.Visible = true
+               tracerLine.From = Vector2.new(currentCamera.ViewportSize.X / 2, currentCamera.ViewportSize.Y)
+               tracerLine.To = Vector2.new(screenPos.X, screenPos.Y)
+               tracerLine.Color = GetRoleColor(role, false)
+           else
+               if tracerLine then tracerLine.Visible = false end
+           end
+       end
+   else
+       if tracerLine then tracerLine:Remove() CreatedTracers[player] = nil end
+   end
+end
+
+local function StartESPLoop()
+   if ESP_Loop_Active then return end
+   ESP_Loop_Active = true
+   task.spawn(function()
+       while ESP_Enabled do
+           for playerName, role in pairs(CurrentPlayersRoles) do
+               local player = Players:FindFirstChild(playerName)
+               if player then UpdatePlayerESP(player, role) end
+           end
+           task.wait(0.03)
+       end
+       ESP_Loop_Active = false
+   end)
+end
+
+-- Объявление функций для ивентов до их использования
+local OnFadeReceived, OnRoundEndReceived
+
+function OnFadeReceived(data)
+   if type(data) ~= "table" then return end
+   ClearAllESP()
+   task.wait(0.1)
+   table.clear(CurrentPlayersRoles)
+   CurrentMurdererName = ""
+   for playerName, info in pairs(data) do
+       if type(info) == "table" and info.Role then
+           CurrentPlayersRoles[playerName] = info.Role
+           if info.Role == "Murderer" then CurrentMurdererName = playerName end
+       end
+   end
+end
+
+function OnRoundEndReceived()
+   table.clear(CurrentPlayersRoles)
+   CurrentMurdererName = ""
+   ClearAllESP()
+end
+
+local function CheckGlobalESPState()
+   if ESP_Highlight_Murderer or ESP_Highlight_Sheriff or ESP_Highlight_Innocent or 
+      ESP_Name_Murderer or ESP_Name_Sheriff or ESP_Name_Innocent or
+      ESP_Tracers_Murderer or ESP_Tracers_Sheriff or ESP_Tracers_Innocent or
+      ESP_Rainbow_Names or ESP_Rainbow_Highlights then
+       if not ESP_Enabled then
+           ESP_Enabled = true
+           local Remotes = ReplicatedStorage:WaitForChild("Remotes", 5)
+           local Gameplay = Remotes and Remotes:WaitForChild("Gameplay", 5)
+           if Gameplay then
+               local FadeRemote = Gameplay:WaitForChild("Fade", 5)
+               local RoundEndRemote = Gameplay:WaitForChild("RoundEndFade", 5)
+               if not Connection_Fade and FadeRemote then Connection_Fade = FadeRemote.OnClientEvent:Connect(OnFadeReceived) end
+               if not Connection_RoundEnd and RoundEndRemote then Connection_RoundEnd = RoundEndRemote.OnClientEvent:Connect(OnRoundEndReceived) end
+           end
+           StartESPLoop()
+       end
+   else
+       ESP_Enabled = false
+       ClearAllESP()
+   end
+end
+
+-- Циклы физики персонажа
+local function StartCharacterLoop()
+   if Connection_CharacterTick then return end
+   Connection_CharacterTick = RunService.Heartbeat:Connect(function()
+       local character = LocalPlayer.Character
+       if not character then return end
+       local humanoid = character:FindFirstChildOfClass("Humanoid")
+       if not humanoid then return end
+
+       if Main_BHop_Enabled and humanoid.FloorMaterial == Enum.Material.Air then
+           humanoid.WalkSpeed = Main_BHop_Speed
+       elseif Main_WalkSpeed_Enabled then
+           humanoid.WalkSpeed = Main_WalkSpeed_Value
+       else
+           if humanoid.WalkSpeed == Main_WalkSpeed_Value or humanoid.WalkSpeed == Main_BHop_Speed then humanoid.WalkSpeed = 16 end
+       end
+
+       if Main_JumpPower_Enabled then
+           humanoid.UseJumpPower = true
+           humanoid.JumpPower = Main_JumpPower_Value
+       else
+           if humanoid.JumpPower == Main_JumpPower_Value then humanoid.JumpPower = 50 end
+       end
+   end)
+end
+
+local function UpdateAtmosphereFog()
+   if Main_Fog_Enabled then
+       Lighting.FogStart = 0
+       Lighting.FogEnd = Main_Fog_Radius
+       Lighting.FogColor = Color3.fromRGB(Main_Fog_R, Main_Fog_G, Main_Fog_B)
+   else
+       Lighting.FogStart = OriginalFogStart
+       Lighting.FogEnd = OriginalFogEnd
+       Lighting.FogColor = OriginalFogColor
+   end
+end
+
+local function GetTargetHitboxPart(character, hitboxCategory)
+   if not character then return nil end
+   local possibleNames = HitboxMapping[hitboxCategory]
+   if possibleNames then
+       for _, partName in ipairs(possibleNames) do
+           local part = character:FindFirstChild(partName)
+           if part and part:IsA("BasePart") then return part end
+       end
+   end
+   return character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head")
+end
+
+local function FireAtMurderer()
+   local Gun = LocalPlayer:FindFirstChild("Backpack"):FindFirstChild("Gun") or (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Gun"))
+   if not Gun then return end
+   local ShootRemote = Gun:FindFirstChild("Shoot")
+   if not ShootRemote or not ShootRemote:IsA("RemoteEvent") then return end
+   if CurrentMurdererName == "" then return end
+   local murdererPlayer = Players:FindFirstChild(CurrentMurdererName)
+   if not murdererPlayer or not murdererPlayer.Character then return end
+   
+   local targetPart = GetTargetHitboxPart(murdererPlayer.Character, Selected_Hitbox)
+   if not targetPart then return end
+   
+   if ShootAI_Enabled then task.wait(ShootAI_Delay) end
+   
+   local originPosition = (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")) and LocalPlayer.Character.HumanoidRootPart.Position or Vector3.new(0,0,0)
+   local targetPosition = targetPart.Position
+   
+   if WallCheck_Enabled then
+       local raycastParams = RaycastParams.new()
+       raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+       raycastParams.FilterDescendantsInstances = {LocalPlayer.Character}
+       local direction = (targetPosition - originPosition)
+       local raycastResult = workspace:Raycast(originPosition, direction, raycastParams)
+       if raycastResult and not raycastResult.Instance:IsDescendantOf(murdererPlayer.Character) and raycastResult.Instance.CanCollide == true then
+           return
+       end
+   end
+   
+   ShootRemote:FireServer(CFrame.new(originPosition, targetPosition), CFrame.new(targetPosition))
+end
+
+local function FindGunDropPart()
+   for _, obj in ipairs(workspace:GetDescendants()) do
+       if obj:IsA("BasePart") and obj.Name == "GunDrop" then return obj end
+   end
+   return nil
+end
+
+local function TeleportDroppedGunToUs()
+   if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return end
+   local gunPart = FindGunDropPart()
+   if gunPart then gunPart.CFrame = LocalPlayer.Character.HumanoidRootPart.CFrame end
+end
+
+local function StartGunAuraLoop()
+   if GunAura_Loop_Active then return end
+   GunAura_Loop_Active = true
+   task.spawn(function()
+       while GunAura_Enabled do
+           if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+               local gunPart = FindGunDropPart()
+               if gunPart then
+                   local distance = (gunPart.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude
+                   if distance <= GunAura_Radius then gunPart.CFrame = LocalPlayer.Character.HumanoidRootPart.CFrame end
+               end
+           end
+           task.wait(0.2)
+       end
+       GunAura_Loop_Active = false
+   end)
+end
+
+-- Цикл автоматического взятия оружия (AutoGetGun)
+local function StartAutoGetGunLoop()
+   if AutoGetGun_Loop_Active then return end
+   AutoGetGun_Loop_Active = true
+   task.spawn(function()
+       while AutoGetGun_Enabled do
+           TeleportDroppedGunToUs()
+           task.wait(0.1)
+       end
+       AutoGetGun_Loop_Active = false
+   end)
+end
+
+-- =========================================================================
+-- УНИВЕРСАЛЬНАЯ ЛОГИКА ОКОН ДЛЯ РЕЗАЙЗА (ИЗМЕНЕНИЯ РАЗМЕРОВ СЛУЖЕБНЫХ КНОПОК)
+-- =========================================================================
+
+local function SetupAdvancedResizing(targetButton)
+   local InResizeMode = false
+   local ResizeBorderSize = 7
+
+   local Borders = {
+       R = Instance.new("TextButton", targetButton),
+       B = Instance.new("TextButton", targetButton),
+       L = Instance.new("TextButton", targetButton),
+       T = Instance.new("TextButton", targetButton),
+       BR = Instance.new("TextButton", targetButton),
+       BL = Instance.new("TextButton", targetButton),
+       TR = Instance.new("TextButton", targetButton),
+       TL = Instance.new("TextButton", targetButton)
+   }
+
+   for name, b in pairs(Borders) do
+       b.BackgroundTransparency = 1
+       b.Text = ""
+       b.Visible = false
+       b.ZIndex = 10
+   end
+
+   local function UpdateBorderPositions()
+       Borders.R.Size = UDim2.new(0, ResizeBorderSize, 1, -ResizeBorderSize*2)
+       Borders.R.Position = UDim2.new(1, -ResizeBorderSize, 0, ResizeBorderSize)
+       
+       Borders.B.Size = UDim2.new(1, -ResizeBorderSize*2, 0, ResizeBorderSize)
+       Borders.B.Position = UDim2.new(0, ResizeBorderSize, 1, -ResizeBorderSize)
+       
+       Borders.L.Size = UDim2.new(0, ResizeBorderSize, 1, -ResizeBorderSize*2)
+       Borders.L.Position = UDim2.new(0, 0, 0, ResizeBorderSize)
+       
+       Borders.T.Size = UDim2.new(1, -ResizeBorderSize*2, 0, ResizeBorderSize)
+       Borders.T.Position = UDim2.new(0, ResizeBorderSize, 0, 0)
+       
+       Borders.BR.Size = UDim2.new(0, ResizeBorderSize, 0, ResizeBorderSize)
+       Borders.BR.Position = UDim2.new(1, -ResizeBorderSize, 1, -ResizeBorderSize)
+       
+       Borders.BL.Size = UDim2.new(0, ResizeBorderSize, 0, ResizeBorderSize)
+       Borders.BL.Position = UDim2.new(0, 0, 1, -ResizeBorderSize)
+       
+       Borders.TR.Size = UDim2.new(0, ResizeBorderSize, 0, ResizeBorderSize)
+       Borders.TR.Position = UDim2.new(1, -ResizeBorderSize, 0, 0)
+       
+       Borders.TL.Size = UDim2.new(0, ResizeBorderSize, 0, ResizeBorderSize)
+       Borders.TL.Position = UDim2.new(0, 0, 0, 0)
+   end
+   UpdateBorderPositions()
+
+   targetButton:GetPropertyChangedSignal("Size"):Connect(UpdateBorderPositions)
+
+   local function ToggleResizeMode()
+       InResizeMode = not InResizeMode
+       for _, b in pairs(Borders) do b.Visible = InResizeMode end
+       targetButton.UIStroke.Color = InResizeMode and Color3.fromRGB(255, 165, 0) or (targetButton.Name == "ShootClickButton" and Color3.fromRGB(0, 120, 255) or Color3.fromRGB(0, 180, 120))
+   end
+
+   targetButton.MouseButton2Click:Connect(ToggleResizeMode)
+   
+   local touchStart = 0
+   targetButton.InputBegan:Connect(function(input)
+       if input.UserInputType == Enum.UserInputType.Touch then
+           touchStart = tick()
+       end
+   end)
+   targetButton.InputEnded:Connect(function(input)
+       if input.UserInputType == Enum.UserInputType.Touch and touchStart > 0 then
+           if tick() - touchStart > 1.2 then ToggleResizeMode() end
+           touchStart = 0
+       end
+   end)
+
+   for mode, btn in pairs(Borders) do
+       local Dragging = false
+       local StartPos, StartSize, MouseStart
+
+       btn.InputBegan:Connect(function(input)
+           if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+               Dragging = true
+               StartPos = targetButton.Position
+               StartSize = targetButton.Size
+               MouseStart = input.Position
+               input.Changed:Connect(function()
+                   if input.UserInputState == Enum.UserInputState.End then Dragging = false end
+               end)
+           end
+       end)
+
+       UserInputService.InputChanged:Connect(function(input)
+           if Dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+               local delta = input.Position - MouseStart
+               local newW = StartSize.X.Offset
+               local newH = StartSize.Y.Offset
+               local newX = StartPos.X.Offset
+               local newY = StartPos.Y.Offset
+
+               if string.find(mode, "R") then newW = math.max(40, StartSize.X.Offset + delta.X) end
+               if string.find(mode, "B") then newH = math.max(30, StartSize.Y.Offset + delta.Y) end
+               
+               if string.find(mode, "L") then 
+                   local change = delta.X
+                   if StartSize.X.Offset - change > 40 then
+                       newW = StartSize.X.Offset - change
+                       newX = StartPos.X.Offset + change
+                   end
+               end
+               
+               if string.find(mode, "T") then 
+                   local change = delta.Y
+                   if StartSize.Y.Offset - change > 30 then
+                       newH = StartSize.Y.Offset - change
+                       newY = StartPos.Y.Offset + change
+                   end
+               end
+
+               targetButton.Size = UDim2.new(StartSize.X.Scale, newW, StartSize.Y.Scale, newH)
+               targetButton.Position = UDim2.new(StartPos.X.Scale, newX, StartPos.Y.Scale, newY)
+           end
+       end)
+   end
+end
+
+-- =========================================================================
+-- СОЗДАНИЕ СЛУЖЕБНЫХ КНОПОК НА ЭКРАНЕ ИГРЫ (SHOOT И GET GUN)
+-- =========================================================================
+
+local function CreateCombatButton()
+   if CombatScreenGui then CombatScreenGui:Destroy() end
+   CombatScreenGui = Instance.new("ScreenGui", CoreGui)
+   CombatScreenGui.Name = "CustomCombatButtonGui"
+   
+   CombatClickButton = Instance.new("TextButton", CombatScreenGui)
+   CombatClickButton.Name = "ShootClickButton"
+   CombatClickButton.Size = DefaultShootSize
+   CombatClickButton.Position = UDim2.new(0.5, -170, 0.65, 0)
+   CombatClickButton.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+   CombatClickButton.BackgroundTransparency = 0.2
+   CombatClickButton.Text = "SHOOT MURDERER"
+   CombatClickButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+   CombatClickButton.Font = Enum.Font.GothamBold
+   CombatClickButton.TextSize = 12
+   CombatClickButton.Active = true
+   CombatClickButton.Draggable = true
+   
+   Instance.new("UICorner", CombatClickButton).CornerRadius = UDim.new(0, 8)
+   
+   local stroke = Instance.new("UIStroke", CombatClickButton)
+   stroke.Color = Color3.fromRGB(0, 120, 255)
+   stroke.Thickness = 1.5
+   
+   CombatClickButton.MouseButton1Click:Connect(function()
+       local curW, curH = CombatClickButton.Size.X.Offset, CombatClickButton.Size.Y.Offset
+       TweenService:Create(CombatClickButton, TweenInfo.new(0.05), {Size = UDim2.new(CombatClickButton.Size.X.Scale, curW + 12, CombatClickButton.Size.Y.Scale, curH + 6)}):Play()
+       task.wait(0.05)
+       TweenService:Create(CombatClickButton, TweenInfo.new(0.05), {Size = UDim2.new(CombatClickButton.Size.X.Scale, curW, CombatClickButton.Size.Y.Scale, curH)}):Play()
+       task.spawn(FireAtMurderer)
+   end)
+
+   SetupAdvancedResizing(CombatClickButton)
+end
+
+local function DestroyCombatButton()
+   if CombatScreenGui then CombatScreenGui:Destroy() CombatScreenGui = nil end
+end
+
+local function CreateWorldButton()
+   if WorldScreenGui then WorldScreenGui:Destroy() end
+   WorldScreenGui = Instance.new("ScreenGui", CoreGui)
+   WorldScreenGui.Name = "CustomWorldButtonGui"
+   
+   WorldClickButton = Instance.new("TextButton", WorldScreenGui)
+   WorldClickButton.Name = "GetGunClickButton"
+   WorldClickButton.Size = DefaultGetGunSize
+   WorldClickButton.Position = UDim2.new(0.5, 10, 0.65, 0)
+   WorldClickButton.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+   WorldClickButton.BackgroundTransparency = 0.2
+   WorldClickButton.Text = "GET DROPPED GUN"
+   WorldClickButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+   WorldClickButton.Font = Enum.Font.GothamBold
+   WorldClickButton.TextSize = 12
+   WorldClickButton.Active = true
+   WorldClickButton.Draggable = true
+   
+   local stroke = Instance.new("UIStroke", WorldClickButton)
+   stroke.Color = Color3.fromRGB(0, 180, 120)
+   stroke.Thickness = 1.5
+   
+   WorldClickButton.MouseButton1Click:Connect(function()
+       local curW, curH = WorldClickButton.Size.X.Offset, WorldClickButton.Size.Y.Offset
+       TweenService:Create(WorldClickButton, TweenInfo.new(0.05), {Size = UDim2.new(WorldClickButton.Size.X.Scale, curW + 12, WorldClickButton.Size.Y.Scale, curH + 12)}):Play()
+       task.wait(0.05)
+       TweenService:Create(WorldClickButton, TweenInfo.new(0.05), {Size = UDim2.new(WorldClickButton.Size.X.Scale, curW, WorldClickButton.Size.Y.Scale, curH)}):Play()
+       TeleportDroppedGunToUs()
+   end)
+
+   SetupAdvancedResizing(WorldClickButton)
+end
+
+local function DestroyWorldButton()
+   if WorldScreenGui then WorldScreenGui:Destroy() WorldScreenGui = nil end
+end
+
+-- =========================================================================
+-- СОЗДАНИЕ ОКРУГЛЕННОГО ИНТЕРФЕЙСА (GUI) С КРЕСТИКОМ И КНОПКАМИ ХАБА
+-- =========================================================================
+
+local CustomGui = Instance.new("ScreenGui", CoreGui)
+CustomGui.Name = "CustomHubGui"
+CustomGui.ResetOnSpawn = false
+
+local MainFrame = Instance.new("Frame", CustomGui)
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 550, 0, 380)
+MainFrame.Position = UDim2.new(0.5, -275, 0.5, -190)
+MainFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
+MainFrame.BorderSizePixel = 0
+MainFrame.ClipsDescendants = true 
+
+local MainCorner = Instance.new("UICorner", MainFrame)
+MainCorner.CornerRadius = UDim.new(0, 14) 
+
+local MainStroke = Instance.new("UIStroke", MainFrame)
+MainStroke.Color = Color3.fromRGB(35, 35, 40)
+MainStroke.Thickness = 1.5
+
+local SidebarFrame = Instance.new("Frame", MainFrame)
+SidebarFrame.Name = "Sidebar"
+SidebarFrame.Size = UDim2.new(0, 150, 1, 0)
+SidebarFrame.Position = UDim2.new(0, 0, 0, 0)
+SidebarFrame.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+SidebarFrame.BorderSizePixel = 0
+
+local SidebarCorner = Instance.new("UICorner", SidebarFrame)
+SidebarCorner.CornerRadius = UDim.new(0, 14)
+
+local SidebarPatch = Instance.new("Frame", SidebarFrame)
+SidebarPatch.Name = "SidebarPatch"
+SidebarPatch.Size = UDim2.new(0, 20, 1, 0)
+SidebarPatch.Position = UDim2.new(1, -20, 0, 0)
+SidebarPatch.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+SidebarPatch.BorderSizePixel = 0
+
+local SidebarRightLine = Instance.new("Frame", SidebarFrame)
+SidebarRightLine.Size = UDim2.new(0, 1, 1, 0)
+SidebarRightLine.Position = UDim2.new(1, -1, 0, 0)
+SidebarRightLine.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+SidebarRightLine.BorderSizePixel = 0
+SidebarRightLine.ZIndex = 2
+
+local HubTitle = Instance.new("TextLabel", SidebarFrame)
+HubTitle.Size = UDim2.new(1, 0, 0, 45)
+HubTitle.BackgroundTransparency = 1
+HubTitle.Text = "GEMINI HUB"
+HubTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+HubTitle.Font = Enum.Font.GothamBold
+HubTitle.TextSize = 14
+HubTitle.ZIndex = 3
+
+local TabButtonsContainer = Instance.new("Frame", SidebarFrame)
+TabButtonsContainer.Size = UDim2.new(1, 0, 1, -85)
+TabButtonsContainer.Position = UDim2.new(0, 0, 0, 45)
+TabButtonsContainer.BackgroundTransparency = 1
+TabButtonsContainer.ZIndex = 3
+
+local TabListLayout = Instance.new("UIListLayout", TabButtonsContainer)
+TabListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+TabListLayout.Padding = UDim.new(0, 4)
+
+local PagesContainer = Instance.new("Frame", MainFrame)
+PagesContainer.Size = UDim2.new(1, -150, 1, -35)
+PagesContainer.Position = UDim2.new(0, 150, 0, 35)
+PagesContainer.BackgroundTransparency = 1
+
+local TopBar = Instance.new("Frame", MainFrame)
+TopBar.Size = UDim2.new(1, -150, 0, 35)
+TopBar.Position = UDim2.new(0, 150, 0, 0)
+TopBar.BackgroundTransparency = 1
+
+local CloseButton = Instance.new("TextButton", TopBar)
+CloseButton.Name = "CloseButton"
+CloseButton.Size = UDim2.new(0, 30, 0, 30)
+CloseButton.Position = UDim2.new(1, -35, 0, 2)
+CloseButton.BackgroundTransparency = 1
+CloseButton.Text = "X"
+CloseButton.TextColor3 = Color3.fromRGB(160, 160, 165)
+CloseButton.Font = Enum.Font.GothamBold
+CloseButton.TextSize = 14
+
+local MinimizeButton = Instance.new("TextButton", TopBar)
+MinimizeButton.Name = "MinimizeButton"
+MinimizeButton.Size = UDim2.new(0, 30, 0, 30)
+MinimizeButton.Position = UDim2.new(1, -65, 0, 2)
+MinimizeButton.BackgroundTransparency = 1
+MinimizeButton.Text = "−"
+MinimizeButton.TextColor3 = Color3.fromRGB(160, 160, 165)
+MinimizeButton.Font = Enum.Font.GothamBold
+MinimizeButton.TextSize = 16
+
+local Dragging, DragInput, DragStart, StartPosition
+local function UpdateDrag(input)
+   local delta = input.Position - DragStart
+   MainFrame.Position = UDim2.new(StartPosition.X.Scale, StartPosition.X.Offset + delta.X, StartPosition.Y.Scale, StartPosition.Y.Offset + delta.Y)
+end
+
+MainFrame.InputBegan:Connect(function(input)
+   if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+       Dragging = true
+       DragStart = input.Position
+       StartPosition = MainFrame.Position
+       input.Changed:Connect(function()
+           if input.UserInputState == Enum.UserInputState.End then Dragging = false end
+       end)
+   end
+end)
+MainFrame.InputChanged:Connect(function(input)
+   if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then DragInput = input end
+end)
+UserInputService.InputChanged:Connect(function(input)
+   if input == DragInput and Dragging then UpdateDrag(input) end
+end)
+
+local OpenIndicator = Instance.new("TextButton", CustomGui)
+OpenIndicator.Name = "OpenIndicator"
+OpenIndicator.Size = UDim2.new(0, 55, 0, 55)
+OpenIndicator.Position = UDim2.new(0, 20, 0, 20)
+OpenIndicator.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+OpenIndicator.BackgroundTransparency = 0.1
+OpenIndicator.Text = "OPEN"
+OpenIndicator.TextColor3 = Color3.fromRGB(0, 180, 255)
+OpenIndicator.Font = Enum.Font.GothamBold
+OpenIndicator.TextSize = 11
+OpenIndicator.Visible = false
+
+Instance.new("UICorner", OpenIndicator).CornerRadius = UDim.new(0, 12)
+local IndicatorStroke = Instance.new("UIStroke", OpenIndicator)
+IndicatorStroke.Color = Color3.fromRGB(45, 45, 50)
+IndicatorStroke.Thickness = 1.5
+
+local IsMinimized = false
+local OriginalSize = MainFrame.Size
+
+local function ToggleMinimize()
+   if IsMinimized then
+       MainFrame.ClipsDescendants = true
+       TweenService:Create(SidebarFrame, TweenInfo.new(0.2), {BackgroundTransparency = 0}):Play()
+       TweenService:Create(SidebarPatch, TweenInfo.new(0.2), {BackgroundTransparency = 0}):Play()
+       TweenService:Create(PagesContainer, TweenInfo.new(0.2), {BackgroundTransparency = 1}):Play()
+       TweenService:Create(HubTitle, TweenInfo.new(0.2), {TextTransparency = 0}):Play()
+       TweenService:Create(CloseButton, TweenInfo.new(0.2), {TextTransparency = 0}):Play()
+       TweenService:Create(MinimizeButton, TweenInfo.new(0.2), {TextTransparency = 0}):Play()
+       TweenService:Create(MainStroke, TweenInfo.new(0.3), {Thickness = 1.5}):Play()
+       
+       local sizeTween = TweenService:Create(MainFrame, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = OriginalSize})
+       sizeTween:Play()
+       sizeTween.Completed:Connect(function() if not IsMinimized then OpenIndicator.Visible = false end end)
+       IsMinimized = false
+   else
+       TweenService:Create(SidebarFrame, TweenInfo.new(0.15), {BackgroundTransparency = 1}):Play()
+       TweenService:Create(SidebarPatch, TweenInfo.new(0.15), {BackgroundTransparency = 1}):Play()
+       TweenService:Create(HubTitle, TweenInfo.new(0.15), {TextTransparency = 1}):Play()
+       TweenService:Create(CloseButton, TweenInfo.new(0.15), {TextTransparency = 1}):Play()
+       TweenService:Create(MinimizeButton, TweenInfo.new(0.15), {TextTransparency = 1}):Play()
+       TweenService:Create(MainStroke, TweenInfo.new(0.15), {Thickness = 0}):Play()
+       
+       local sizeTween = TweenService:Create(MainFrame, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(0, 550, 0, 0)})
+       sizeTween:Play()
+       sizeTween.Completed:Connect(function() if IsMinimized then OpenIndicator.Visible = true end end)
+       IsMinimized = true
+   end
+end
+
+MinimizeButton.MouseButton1Click:Connect(ToggleMinimize)
+OpenIndicator.MouseButton1Click:Connect(ToggleMinimize)
+
+CloseButton.MouseButton1Click:Connect(function()
+   TweenService:Create(SidebarFrame, TweenInfo.new(0.1), {BackgroundTransparency = 1}):Play()
+   TweenService:Create(SidebarPatch, TweenInfo.new(0.1), {BackgroundTransparency = 1}):Play()
+   TweenService:Create(HubTitle, TweenInfo.new(0.1), {TextTransparency = 1}):Play()
+   TweenService:Create(CloseButton, TweenInfo.new(0.1), {TextTransparency = 1}):Play()
+   TweenService:Create(MinimizeButton, TweenInfo.new(0.1), {TextTransparency = 1}):Play()
+   TweenService:Create(MainStroke, TweenInfo.new(0.1), {Thickness = 0}):Play()
+
+   local closeTween = TweenService:Create(MainFrame, TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {Size = UDim2.new(0, 550, 0, 0)})
+   closeTween:Play()
+   closeTween.Completed:Connect(function()
+       ESP_Enabled = false
+       ClearAllESP()
+       DestroyCombatButton()
+       DestroyWorldButton()
+       
+       if Connection_Fade then Connection_Fade:Disconnect() end
+       if Connection_RoundEnd then Connection_RoundEnd:Disconnect() end
+       if Connection_CharacterTick then Connection_CharacterTick:Disconnect() end
+       
+       Lighting.FogStart = OriginalFogStart
+       Lighting.FogEnd = OriginalFogEnd
+       Lighting.FogColor = OriginalFogColor
+       
+       CustomGui:Destroy()
+   end)
+end)
+
+CloseButton.MouseEnter:Connect(function() CloseButton.TextColor3 = Color3.fromRGB(255, 60, 60) end)
+CloseButton.MouseLeave:Connect(function() CloseButton.TextColor3 = Color3.fromRGB(160, 160, 165) end)
+MinimizeButton.MouseEnter:Connect(function() MinimizeButton.TextColor3 = Color3.fromRGB(255, 255, 255) end)
+MinimizeButton.MouseLeave:Connect(function() MinimizeButton.TextColor3 = Color3.fromRGB(160, 160, 165) end)
+
+-- =========================================================================
+-- ФУНКЦИОНАЛ СОЗДАНИЯ СТРАНИЦ И СЛАЙДЕРОВ ИНТЕРФЕЙСА
+-- =========================================================================
+
+local Pages = {}
+local TabButtons = {}
+local FirstPage = nil
+
+local function CreatePage(pageName)
+   local PageScrollingFrame = Instance.new("ScrollingFrame", PagesContainer)
+   PageScrollingFrame.Name = pageName .. "Page"
+   PageScrollingFrame.Size = UDim2.new(1, 0, 1, 0)
+   PageScrollingFrame.BackgroundTransparency = 1
+   PageScrollingFrame.Visible = false
+   PageScrollingFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+   PageScrollingFrame.ScrollBarThickness = 3
+   PageScrollingFrame.ScrollBarImageColor3 = Color3.fromRGB(60, 60, 65)
+   
+   local PagePadding = Instance.new("UIPadding", PageScrollingFrame)
+   PagePadding.PaddingLeft = UDim.new(0, 15)
+   PagePadding.PaddingTop = UDim.new(0, 15)
+   PagePadding.PaddingRight = UDim.new(0, 15)
+   
+   local PageListLayout = Instance.new("UIListLayout", PageScrollingFrame)
+   PageListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+   PageListLayout.Padding = UDim.new(0, 10)
+   
+   PageListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+       PageScrollingFrame.CanvasSize = UDim2.new(0, 0, 0, PageListLayout.AbsoluteContentSize.Y + 30)
+   end)
+   
+   local TabButton = Instance.new("TextButton", TabButtonsContainer)
+   TabButton.Size = UDim2.new(1, -20, 0, 35)
+   TabButton.Position = UDim2.new(0, 10, 0, 0)
+   TabButton.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+   TabButton.BackgroundTransparency = 1
+   TabButton.Text = "  " .. pageName
+   TabButton.TextColor3 = Color3.fromRGB(140, 140, 145)
+   TabButton.Font = Enum.Font.GothamSemibold
+   TabButton.TextSize = 12
+   TabButton.TextXAlignment = Enum.TextXAlignment.Left
+   
+   Instance.new("UICorner", TabButton).CornerRadius = UDim.new(0, 6)
+   local btnPadding = Instance.new("UIPadding", TabButton)
+   btnPadding.PaddingLeft = UDim.new(0, 10)
+
+   Pages[pageName] = PageScrollingFrame
+   TabButtons[pageName] = TabButton
+   
+   if not FirstPage then FirstPage = pageName end
+   
+   TabButton.MouseButton1Click:Connect(function()
+       for name, frame in pairs(Pages) do frame.Visible = (name == pageName) end
+       for name, btn in pairs(TabButtons) do
+           if name == pageName then
+               btn.BackgroundTransparency = 0.4
+               btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+           else
+               btn.BackgroundTransparency = 1
+               btn.TextColor3 = Color3.fromRGB(140, 140, 145)
+           end
+       end
+   end)
+   
+   return PageScrollingFrame
+end
+
+local function AddSection(pageFrame, text)
+   local SectionLabel = Instance.new("TextLabel", pageFrame)
+   SectionLabel.Size = UDim2.new(1, 0, 0, 25)
+   SectionLabel.BackgroundTransparency = 1
+   SectionLabel.Text = text:upper()
+   SectionLabel.TextColor3 = Color3.fromRGB(0, 180, 255)
+   SectionLabel.Font = Enum.Font.GothamBold
+   SectionLabel.TextSize = 11
+   SectionLabel.TextXAlignment = Enum.TextXAlignment.Left
+end
+
+local function AddButton(pageFrame, text, callback)
+   local ButtonFrame = Instance.new("TextButton", pageFrame)
+   ButtonFrame.Size = UDim2.new(1, 0, 0, 40)
+   ButtonFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+   ButtonFrame.Text = text
+   ButtonFrame.TextColor3 = Color3.fromRGB(230, 230, 235)
+   ButtonFrame.Font = Enum.Font.GothamSemibold
+   ButtonFrame.TextSize = 13
+   
+   Instance.new("UICorner", ButtonFrame).CornerRadius = UDim.new(0, 7)
+   local stroke = Instance.new("UIStroke", ButtonFrame)
+   stroke.Color = Color3.fromRGB(35, 35, 40)
+   
+   ButtonFrame.MouseEnter:Connect(function() stroke.Color = Color3.fromRGB(55, 55, 65) end)
+   ButtonFrame.MouseLeave:Connect(function() stroke.Color = Color3.fromRGB(35, 35, 40) end)
+   
+   ButtonFrame.MouseButton1Click:Connect(function()
+       TweenService:Create(ButtonFrame, TweenInfo.new(0.05), {BackgroundColor3 = Color3.fromRGB(30, 30, 35)}):Play()
+       task.wait(0.05)
+       TweenService:Create(ButtonFrame, TweenInfo.new(0.05), {BackgroundColor3 = Color3.fromRGB(20, 20, 24)}):Play()
+       task.spawn(callback)
+   end)
+end
+
+local function AddToggle(pageFrame, text, defaultState, callback)
+   local ToggleFrame = Instance.new("Frame", pageFrame)
+   ToggleFrame.Size = UDim2.new(1, 0, 0, 40)
+   ToggleFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+   
+   Instance.new("UICorner", ToggleFrame).CornerRadius = UDim.new(0, 7)
+   local stroke = Instance.new("UIStroke", ToggleFrame)
+   stroke.Color = Color3.fromRGB(35, 35, 40)
+   
+   local Label = Instance.new("TextLabel", ToggleFrame)
+   Label.Size = UDim2.new(1, -60, 1, 0)
+   Label.Position = UDim2.new(0, 12, 0, 0)
+   Label.BackgroundTransparency = 1
+   Label.Text = text
+   Label.TextColor3 = Color3.fromRGB(210, 210, 215)
+   Label.Font = Enum.Font.GothamSemibold
+   Label.TextSize = 13
+   Label.TextXAlignment = Enum.TextXAlignment.Left
+   
+   local ToggleSwitch = Instance.new("TextButton", ToggleFrame)
+   ToggleSwitch.Size = UDim2.new(0, 34, 0, 18)
+   ToggleSwitch.Position = UDim2.new(1, -46, 0.5, -9)
+   ToggleSwitch.BackgroundColor3 = defaultState and Color3.fromRGB(0, 180, 255) or Color3.fromRGB(40, 40, 45)
+   ToggleSwitch.Text = ""
+   Instance.new("UICorner", ToggleSwitch).CornerRadius = UDim.new(1, 0)
+   
+   local ToggleCircle = Instance.new("Frame", ToggleSwitch)
+   ToggleCircle.Size = UDim2.new(0, 14, 0, 14)
+   ToggleCircle.Position = defaultState and UDim2.new(1, -16, 0.5, -7) or UDim2.new(0, 2, 0.5, -7)
+   ToggleCircle.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+   Instance.new("UICorner", ToggleCircle).CornerRadius = UDim.new(1, 0)
+   
+   local state = defaultState
+   ToggleSwitch.MouseButton1Click:Connect(function()
+       state = not state
+       if state then
+           TweenService:Create(ToggleSwitch, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(0, 180, 255)}):Play()
+           TweenService:Create(ToggleCircle, TweenInfo.new(0.2), {Position = UDim2.new(1, -16, 0.5, -7)}):Play()
+       else
+           TweenService:Create(ToggleSwitch, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(40, 40, 45)}):Play()
+           TweenService:Create(ToggleCircle, TweenInfo.new(0.2), {Position = UDim2.new(0, 2, 0.5, -7)}):Play()
+       end
+       task.spawn(callback, state)
+   end)
+end
+
+local function AddSlider(pageFrame, text, min, max, defaultValue, valueSuffix, callback)
+   local SliderFrame = Instance.new("Frame", pageFrame)
+   SliderFrame.Size = UDim2.new(1, 0, 0, 50)
+   SliderFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+   
+   Instance.new("UICorner", SliderFrame).CornerRadius = UDim.new(0, 7)
+   local stroke = Instance.new("UIStroke", SliderFrame)
+   stroke.Color = Color3.fromRGB(35, 35, 40)
+   
+   local Label = Instance.new("TextLabel", SliderFrame)
+   Label.Size = UDim2.new(0.7, 0, 0, 25)
+   Label.Position = UDim2.new(0, 12, 0, 2)
+   Label.BackgroundTransparency = 1
+   Label.Text = text
+   Label.TextColor3 = Color3.fromRGB(210, 210, 215)
+   Label.Font = Enum.Font.GothamSemibold
+   Label.TextSize = 13
+   Label.TextXAlignment = Enum.TextXAlignment.Left
+   
+   local ValueLabel = Instance.new("TextLabel", SliderFrame)
+   ValueLabel.Size = UDim2.new(0.25, 0, 0, 25)
+   ValueLabel.Position = UDim2.new(0.7, 12, 0, 2)
+   ValueLabel.BackgroundTransparency = 1
+   ValueLabel.Text = tostring(defaultValue) .. " " .. valueSuffix
+   ValueLabel.TextColor3 = Color3.fromRGB(0, 180, 255)
+   ValueLabel.Font = Enum.Font.GothamBold
+   ValueLabel.TextSize = 12
+   ValueLabel.TextXAlignment = Enum.TextXAlignment.Right
+   
+   local SliderBarBackground = Instance.new("TextButton", SliderFrame)
+   SliderBarBackground.Size = UDim2.new(1, -24, 0, 6)
+   SliderBarBackground.Position = UDim2.new(0, 12, 0, 34)
+   SliderBarBackground.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+   SliderBarBackground.Text = ""
+   Instance.new("UICorner", SliderBarBackground).CornerRadius = UDim.new(1, 0)
+   
+   local SliderBarFill = Instance.new("Frame", SliderBarBackground)
+   local initPercent = math.clamp((defaultValue - min) / (max - min), 0, 1)
+   SliderBarFill.Size = UDim2.new(initPercent, 0, 1, 0)
+   SliderBarFill.BackgroundColor3 = Color3.fromRGB(0, 180, 255)
+   Instance.new("UICorner", SliderBarFill).CornerRadius = UDim.new(1, 0)
+   
+   local function UpdateSliderInput(input)
+       local xOffset = math.clamp(input.Position.X - SliderBarBackground.AbsolutePosition.X, 0, SliderBarBackground.AbsoluteSize.X)
+       local percent = xOffset / SliderBarBackground.AbsoluteSize.X
+       local rawValue = min + (percent * (max - min))
+       
+       local finalValue = math.floor(rawValue * 10 + 0.5) / 10
+       if max - min > 10 then finalValue = math.floor(rawValue + 0.5) end
+       
+       SliderBarFill.Size = UDim2.new(percent, 0, 1, 0)
+       ValueLabel.Text = tostring(finalValue) .. " " .. valueSuffix
+       task.spawn(callback, finalValue)
+   end
+   
+   local IsSliding = false
+   SliderBarBackground.InputBegan:Connect(function(input)
+       if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+           IsSliding = true
+           UpdateSliderInput(input)
+       end
+   end)
+   UserInputService.InputChanged:Connect(function(input)
+       if IsSliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+           UpdateSliderInput(input)
+       end
+   end)
+   UserInputService.InputEnded:Connect(function(input)
+       if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then IsSliding = false end
+   end)
+end
+
+local function AddDropdown(pageFrame, text, options, defaultSelected, callback)
+   local DropdownFrame = Instance.new("Frame", pageFrame)
+   DropdownFrame.Size = UDim2.new(1, 0, 0, 40)
+   DropdownFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+   DropdownFrame.ClipsDescendants = true
+   
+   Instance.new("UICorner", DropdownFrame).CornerRadius = UDim.new(0, 7)
+   local stroke = Instance.new("UIStroke", DropdownFrame)
+   stroke.Color = Color3.fromRGB(35, 35, 40)
+   
+   local Label = Instance.new("TextLabel", DropdownFrame)
+   Label.Size = UDim2.new(0.6, 0, 0, 40)
+   Label.Position = UDim2.new(0, 12, 0, 0)
+   Label.BackgroundTransparency = 1
+   Label.Text = text
+   Label.TextColor3 = Color3.fromRGB(210, 210, 215)
+   Label.Font = Enum.Font.GothamSemibold
+   Label.TextSize = 13
+   Label.TextXAlignment = Enum.TextXAlignment.Left
+   
+   local SelectedLabel = Instance.new("TextButton", DropdownFrame)
+   SelectedLabel.Size = UDim2.new(0.4, -20, 0, 26)
+   SelectedLabel.Position = UDim2.new(0.6, 8, 0, 7)
+   SelectedLabel.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+   SelectedLabel.Text = defaultSelected
+   SelectedLabel.TextColor3 = Color3.fromRGB(0, 180, 255)
+   SelectedLabel.Font = Enum.Font.GothamBold
+   SelectedLabel.TextSize = 11
+   
+   Instance.new("UICorner", SelectedLabel).CornerRadius = UDim.new(0, 5)
+   local optionStroke = Instance.new("UIStroke", SelectedLabel)
+   optionStroke.Color = Color3.fromRGB(45, 45, 50)
+   
+   local OptionsContainer = Instance.new("Frame", DropdownFrame)
+   OptionsContainer.Size = UDim2.new(1, -24, 0, #options * 30)
+   OptionsContainer.Position = UDim2.new(0, 12, 0, 45)
+   OptionsContainer.BackgroundTransparency = 1
+   
+   local optList = Instance.new("UIListLayout", OptionsContainer)
+   optList.Padding = UDim.new(0, 3)
+   
+   local IsOpen = false
+   SelectedLabel.MouseButton1Click:Connect(function()
+       IsOpen = not IsOpen
+       if IsOpen then
+           DropdownFrame.Size = UDim2.new(1, 0, 0, 50 + (#options * 33))
+       else
+           DropdownFrame.Size = UDim2.new(1, 0, 0, 40)
+       end
+   end)
+   
+   for _, optName in ipairs(options) do
+       local OptBtn = Instance.new("TextButton", OptionsContainer)
+       OptBtn.Size = UDim2.new(1, 0, 0, 28)
+       OptBtn.BackgroundColor3 = Color3.fromRGB(26, 26, 30)
+       OptBtn.Text = optName
+       OptBtn.TextColor3 = Color3.fromRGB(180, 180, 185)
+       OptBtn.Font = Enum.Font.GothamSemibold
+       OptBtn.TextSize = 12
+       Instance.new("UICorner", OptBtn).CornerRadius = UDim.new(0, 4)
+       
+       OptBtn.MouseButton1Click:Connect(function()
+           SelectedLabel.Text = optName
+           IsOpen = false
+           DropdownFrame.Size = UDim2.new(1, 0, 0, 40)
+           task.spawn(callback, optName)
+       end)
+   end
+end
+
+-- =========================================================================
+-- СВЯЗКА ИНТЕРФЕЙСА С ФУНКЦИОНАЛОМ СТРАНИЦ
+-- =========================================================================
+
+local MainTabFrame = CreatePage("Main")
+local VisualTabFrame = CreatePage("Visual")
+local CombatTabFrame = CreatePage("Combat")
+local WorldTabFrame = CreatePage("World")
+
+if FirstPage then
+   Pages[FirstPage].Visible = true
+   TabButtons[FirstPage].BackgroundTransparency = 0.4
+   TabButtons[FirstPage].TextColor3 = Color3.fromRGB(255, 255, 255)
+end
+
+StartCharacterLoop()
+
+-- --- НАСТРОЙКА ВКЛАДКИ MAIN ---
+AddSection(MainTabFrame, "Player Physics Modifiers")
+
+AddToggle(MainTabFrame, "Enable Custom WalkSpeed", false, function(Value)
+   Main_WalkSpeed_Enabled = Value
+end)
+AddSlider(MainTabFrame, "WalkSpeed Multiplier", 1, 100, 16, "speed", function(Value)
+   Main_WalkSpeed_Value = Value
+end)
+
+AddToggle(MainTabFrame, "Enable Custom JumpPower", false, function(Value)
+   Main_JumpPower_Enabled = Value
+end)
+AddSlider(MainTabFrame, "JumpPower Multiplier", 1, 300, 50, "power", function(Value)
+   Main_JumpPower_Value = Value
+end)
+
+AddSection(MainTabFrame, "Movement Advanced Logic")
+
+AddToggle(MainTabFrame, "Enable BunnyHop", false, function(Value)
+   Main_BHop_Enabled = Value
+end)
+AddSlider(MainTabFrame, "BHop Air Speed", 1, 100, 16, "speed", function(Value)
+   Main_BHop_Speed = Value
+end)
+
+AddSection(MainTabFrame, "Environment Modifiers")
+
+AddToggle(MainTabFrame, "Enable Custom Map Fog", false, function(Value)
+   Main_Fog_Enabled = Value
+   UpdateAtmosphereFog()
+end)
+AddSlider(MainTabFrame, "Fog Density Radius", 5, 2000, 500, "studs", function(Value)
+   Main_Fog_Radius = Value
+   UpdateAtmosphereFog()
+end)
+
+AddSection(MainTabFrame, "Fog Color Palette (RGB)")
+
+AddSlider(MainTabFrame, "Palette - Red Channel", 0, 255, 255, "", function(Value)
+   Main_Fog_R = Value
+   UpdateAtmosphereFog()
+end)
+AddSlider(MainTabFrame, "Palette - Green Channel", 0, 255, 255, "", function(Value)
+   Main_Fog_G = Value
+   UpdateAtmosphereFog()
+end)
+AddSlider(MainTabFrame, "Palette - Blue Channel", 0, 255, 255, "", function(Value)
+   Main_Fog_B = Value
+   UpdateAtmosphereFog()
+end)
+
+
+-- --- НАСТРОЙКА ВКЛАДКИ VISUAL ---
+AddSection(VisualTabFrame, "Highlight ESP Options")
+
+AddToggle(VisualTabFrame, "Highlight Murderer", false, function(Value)
+   ESP_Highlight_Murderer = Value
+   CheckGlobalESPState()
+end)
+AddToggle(VisualTabFrame, "Highlight Sheriff", false, function(Value)
+   ESP_Highlight_Sheriff = Value
+   CheckGlobalESPState()
+end)
+AddToggle(VisualTabFrame, "Highlight Innocent", false, function(Value)
+   ESP_Highlight_Innocent = Value
+   CheckGlobalESPState()
+end)
+
+AddSection(VisualTabFrame, "Names ESP Options")
+
+AddToggle(VisualTabFrame, "Names ESP Murderer", false, function(Value)
+   ESP_Name_Murderer = Value
+   CheckGlobalESPState()
+end)
+AddToggle(VisualTabFrame, "Names ESP Sheriff", false, function(Value)
+   ESP_Name_Sheriff = Value
+   CheckGlobalESPState()
+end)
+AddToggle(VisualTabFrame, "Names ESP Innocent", false, function(Value)
+   ESP_Name_Innocent = Value
+   CheckGlobalESPState()
+end)
+
+AddSection(VisualTabFrame, "Tracers (Lines) Options")
+
+AddToggle(VisualTabFrame, "Tracers Murderer", false, function(Value)
+   ESP_Tracers_Murderer = Value
+   CheckGlobalESPState()
+end)
+AddToggle(VisualTabFrame, "Tracers Sheriff", false, function(Value)
+   ESP_Tracers_Sheriff = Value
+   CheckGlobalESPState()
+end)
+AddToggle(VisualTabFrame, "Tracers Innocent", false, function(Value)
+   ESP_Tracers_Innocent = Value
+   CheckGlobalESPState()
+end)
+
+AddSection(VisualTabFrame, "Rainbow Special Modes")
+
+AddToggle(VisualTabFrame, "Rainbow Highlights Mode", false, function(Value)
+   ESP_Rainbow_Highlights = Value
+   CheckGlobalESPState()
+end)
+AddToggle(VisualTabFrame, "Rainbow Names Mode", false, function(Value)
+   ESP_Rainbow_Names = Value
+   CheckGlobalESPState()
+end)
+
+
+-- --- НАСТРОЙКА ВКЛАДКИ COMBAT ---
+AddSection(CombatTabFrame, "Target Settings")
+
+AddDropdown(CombatTabFrame, "Target Hitbox Location", {"Head", "Torso / Body", "Left Leg", "Right Leg", "Left Arm", "Right Arm"}, "Head", function(SelectedOption)
+   Selected_Hitbox = SelectedOption
+end)
+AddToggle(CombatTabFrame, "Show Interactive Shoot Button", false, function(Value)
+   AutoShoot_Enabled = Value
+   if AutoShoot_Enabled then CreateCombatButton() else DestroyCombatButton() end
+end)
+AddToggle(CombatTabFrame, "Wall Check", false, function(Value)
+   WallCheck_Enabled = Value
+end)
+
+AddSection(CombatTabFrame, "Shoot AI Configuration")
+
+AddToggle(CombatTabFrame, "Enable Shoot AI (Thinking Delay)", false, function(Value)
+   ShootAI_Enabled = Value
+end)
+AddSlider(CombatTabFrame, "Shoot AI Delay", 0, 5, 1, "sec", function(Value)
+   ShootAI_Delay = Value
+end)
+
+
+-- --- НАСТРОЙКА ВКЛАДКИ WORLD ---
+AddSection(WorldTabFrame, "Dropped Gun Utilities")
+
+AddButton(WorldTabFrame, "Teleport Dropped Gun Once", function()
+   TeleportDroppedGunToUs()
+end)
+AddToggle(WorldTabFrame, "Show Interactive Get Gun Button", false, function(Value)
+   GunTP_Button_Enabled = Value
+   if GunTP_Button_Enabled then CreateWorldButton() else DestroyWorldButton() end
+end)
+
+AddSection(WorldTabFrame, "Automatic Gun Collection")
+
+AddToggle(WorldTabFrame, "Enable AutoGetGun (Instant Collect)", false, function(Value)
+   AutoGetGun_Enabled = Value
+   if AutoGetGun_Enabled then StartAutoGetGunLoop() end
+end)
+
+AddToggle(WorldTabFrame, "Enable Gun Aura (Radius Pickup)", false, function(Value)
+   GunAura_Enabled = Value
+   if GunAura_Enabled then StartGunAuraLoop() end
+end)
+AddSlider(WorldTabFrame, "Gun Aura Radius", 5, 100, 10, "studs", function(Value)
+   GunAura_Radius = Value
+end)
